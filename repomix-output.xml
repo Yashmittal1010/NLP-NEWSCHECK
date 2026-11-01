@@ -1,0 +1,1223 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+backend/
+  app/
+    __init__.py
+    main.py
+    model_service.py
+    schemas.py
+    text.py
+  tests/
+    test_basics.py
+  check_labels.py
+  diagnose_bundle.py
+  requirements-newsguard.txt
+  train_classical.py
+data/
+  raw/
+    WELFake_Dataset.csv
+frontend/
+  src/
+    App.jsx
+    index.css
+    main.jsx
+  index.html
+  package.json
+  postcss.config.js
+  tailwind.config.js
+  vite.config.js
+models/
+  classical_bundle.joblib
+outputs/
+  classical_metrics.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="backend/app/__init__.py">
+
+</file>
+
+<file path="backend/app/main.py">
+import json
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from .schemas import PredictRequest
+from .model_service import load_bundle, predict_one
+
+
+# --------------------------------------------------
+# Application configuration
+# --------------------------------------------------
+
+app = FastAPI(
+    title="NEWSCHECK API",
+    version="1.0.0",
+    description=(
+        "Academic NLP text-classification prototype; "
+        "not an independent fact-checker."
+    ),
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
+
+
+# --------------------------------------------------
+# Project paths
+# backend/app/main.py -> project root
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+METRICS_FILE = PROJECT_ROOT / "outputs" / "classical_metrics.json"
+
+
+# --------------------------------------------------
+# Health endpoint
+# --------------------------------------------------
+
+@app.get("/health")
+def health():
+    trained = load_bundle() is not None
+
+    return {
+        "status": "ready" if trained else "models_not_trained",
+        "models_trained": trained,
+    }
+
+
+# --------------------------------------------------
+# Available models
+# --------------------------------------------------
+
+@app.get("/models")
+def models():
+    return {
+        "classical": [
+            {
+                "id": "logistic_regression",
+                "name": "Logistic Regression",
+            },
+            {
+                "id": "passive_aggressive",
+                "name": "Passive Aggressive",
+            },
+            {
+                "id": "naive_bayes",
+                "name": "Multinomial Naive Bayes",
+            },
+        ],
+        "transformer": {
+            "available": False,
+            "note": (
+                "Optional DistilBERT experiment is trained separately."
+            ),
+        },
+    }
+
+
+# --------------------------------------------------
+# News text prediction
+# --------------------------------------------------
+
+@app.post("/predict")
+def predict(request: PredictRequest):
+    try:
+        return predict_one(request.text, request.model)
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction failed: {type(exc).__name__}",
+        ) from exc
+
+
+# --------------------------------------------------
+# Model evaluation metrics
+# --------------------------------------------------
+
+@app.get("/metrics")
+def get_metrics():
+    """
+    Return the saved evaluation metrics generated by
+    backend/train_classical.py.
+    """
+
+    if not METRICS_FILE.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Evaluation metrics not found. "
+                "Train the classical models first."
+            ),
+        )
+
+    try:
+        with METRICS_FILE.open("r", encoding="utf-8") as file:
+            metrics = json.load(file)
+
+        if not isinstance(metrics, dict) or not isinstance(
+            metrics.get("models"), dict
+        ):
+            raise ValueError("Unexpected metrics file structure.")
+
+        return metrics
+
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="The evaluation metrics file contains invalid data.",
+        ) from exc
+
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not read the evaluation metrics file.",
+        ) from exc
+</file>
+
+<file path="backend/app/model_service.py">
+from pathlib import Path
+import joblib
+import numpy as np
+from .text import normalize_text
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BUNDLE_PATH = PROJECT_ROOT / "models" / "classical_bundle.joblib"
+_bundle = None
+
+def load_bundle():
+    global _bundle
+    if _bundle is not None:
+        return _bundle
+    if not BUNDLE_PATH.exists():
+        return None
+    _bundle = joblib.load(BUNDLE_PATH)
+    return _bundle
+
+def predict_one(text: str, model_name: str) -> dict:
+    bundle = load_bundle()
+    if bundle is None:
+        raise RuntimeError("Models are not trained. Run python backend/train_classical.py first.")
+    vector = bundle["vectorizer"].transform([normalize_text(text)])
+    model_names = list(bundle["models"]) if model_name == "all" else [model_name]
+    results = []
+    for name in model_names:
+        model = bundle["models"][name]
+        prediction = int(model.predict(vector)[0])
+        label = "FAKE" if prediction == 0 else "REAL"  # Verify source dataset convention.
+        confidence = None
+        if hasattr(model, "predict_proba"):
+            confidence = float(np.max(model.predict_proba(vector)[0]))
+        results.append({
+            "model": name,
+            "label": label,
+            "confidence": round(confidence, 4) if confidence is not None else None,
+            "confidence_note": "Model score, not probability of factual truth."
+        })
+    fake_votes = sum(item["label"] == "FAKE" for item in results)
+    real_votes = sum(item["label"] == "REAL" for item in results)
+    overall = "UNCERTAIN" if fake_votes == real_votes else ("FAKE" if fake_votes > real_votes else "REAL")
+    return {
+        "overall": overall,
+        "model_count": len(results),
+        "results": results,
+        "warning": "This predicts text patterns learned from dataset labels; it does not fact-check claims."
+    }
+</file>
+
+<file path="backend/app/schemas.py">
+from pydantic import BaseModel, Field, field_validator
+
+ALLOWED_MODELS = {"logistic_regression", "passive_aggressive", "naive_bayes", "all"}
+
+class PredictRequest(BaseModel):
+    text: str = Field(min_length=10, max_length=20000)
+    model: str = "logistic_regression"
+
+    @field_validator("text")
+    @classmethod
+    def text_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Text cannot be blank.")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def model_is_supported(cls, value: str) -> str:
+        if value not in ALLOWED_MODELS:
+            raise ValueError(f"Model must be one of: {', '.join(sorted(ALLOWED_MODELS))}")
+        return value
+</file>
+
+<file path="backend/app/text.py">
+import html
+import re
+
+URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+TAG_RE = re.compile(r"<[^>]+>")
+SPACE_RE = re.compile(r"\s+")
+
+def normalize_text(value: str) -> str:
+    """Conservative normalization: preserve negation, numbers, and punctuation."""
+    if not isinstance(value, str):
+        return ""
+    value = html.unescape(value)
+    value = TAG_RE.sub(" ", value)
+    value = URL_RE.sub(" URL ", value)
+    return SPACE_RE.sub(" ", value.lower()).strip()
+</file>
+
+<file path="backend/tests/test_basics.py">
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+from app.main import app
+from app.schemas import PredictRequest
+from app.text import normalize_text
+
+client = TestClient(app)
+
+def test_normalization_preserves_negation():
+    value = normalize_text("<p>NOT true! https://example.com</p>")
+    assert "not true" in value and "https://" not in value and "url" in value
+
+def test_request_validation():
+    assert PredictRequest(text="A sufficiently long example text", model="all").model == "all"
+    try:
+        PredictRequest(text="A sufficiently long example text", model="bad")
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("Unsupported model should be rejected")
+
+def test_health_endpoint():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert "models_trained" in response.json()
+
+def test_short_input_rejected():
+    assert client.post("/predict", json={"text": "tiny", "model": "all"}).status_code == 422
+</file>
+
+<file path="backend/check_labels.py">
+import pandas as pd
+
+df = pd.read_csv(r"C:\Users\Lenovo\Desktop\fake-news-detection\data\raw\WELFake_Dataset.csv")
+
+reuters_rows = df[df["text"].str.contains(r"WASHINGTON \(Reuters\)", na=False, regex=True)]
+print("Rows matching 'WASHINGTON (Reuters)' dateline:", len(reuters_rows))
+print("\nLabel distribution for those rows:")
+print(reuters_rows["label"].value_counts())
+
+print("\n--- For comparison, a few other outlet-style checks ---")
+
+breitbart_rows = df[df["text"].str.contains("Breitbart", na=False, case=False)]
+print("\nRows mentioning 'Breitbart':", len(breitbart_rows))
+print(breitbart_rows["label"].value_counts())
+
+wire_rows = df[df["text"].str.contains("21st Century Wire|21WIRE", na=False, case=False, regex=True)]
+print("\nRows mentioning '21st Century Wire' / '21WIRE':", len(wire_rows))
+print(wire_rows["label"].value_counts())p
+</file>
+
+<file path="backend/diagnose_bundle.py">
+"""
+diagnose_bundle.py
+
+Diagnostic tool for NEWSCHECK's classical_bundle.joblib.
+
+Place this file at the same level as train_classical.py
+(i.e. backend/diagnose_bundle.py), so it can import `app.text`
+the same way train_classical.py does.
+
+Run from backend/ with the venv active:
+
+    python diagnose_bundle.py
+
+What it does:
+  1. Loads the trained bundle (vectorizer + models + label_mapping).
+  2. Prints the label_mapping actually stored in the bundle, so you can
+     confirm 0=FAKE / 1=REAL is really what was trained (not just assumed).
+  3. For Logistic Regression and Passive-Aggressive (both linear models
+     with .coef_), prints the top N words/n-grams pushing predictions
+     toward FAKE and toward REAL.
+  4. For Naive Bayes, prints the top N words/n-grams by log-probability
+     ratio between the two classes.
+  5. Runs a small set of neutral, "clean prose" synthetic-style test
+     sentences through all three models and prints label + confidence,
+     so you can see directly whether clean/neutral register alone is
+     enough to push predictions toward REAL.
+
+This does not modify the bundle, the dataset, or any training code.
+It only reads models/classical_bundle.joblib.
+"""
+
+import argparse
+from pathlib import Path
+
+import joblib
+import numpy as np
+
+from app.text import normalize_text
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BUNDLE_PATH = PROJECT_ROOT / "models" / "classical_bundle.joblib"
+
+TOP_N = 20
+
+# Neutral, well-formed, "clean prose" test sentences with no obvious
+# sensational language -- the kind of register a synthetic/LLM-written
+# article tends to have regardless of whether its content is accurate.
+TEST_SENTENCES = [
+    "The city council approved a new budget plan on Tuesday after "
+    "several hours of debate among local officials.",
+    "Researchers at the university published a study this week "
+    "examining long-term trends in regional rainfall patterns.",
+    "The company announced quarterly earnings that exceeded analyst "
+    "expectations, according to a statement released Thursday.",
+    "A spokesperson confirmed that the proposed merger is still under "
+    "review by regulators in both countries.",
+    "Scientists have discovered a previously unknown species of frog "
+    "living in a remote rainforest region, according to a new report.",
+]
+
+
+def print_top_features_linear(name, model, feature_names, label_mapping):
+    if not hasattr(model, "coef_"):
+        print(f"  [{name}] has no .coef_, skipping linear feature dump.")
+        return
+
+    coefs = model.coef_[0]
+    order = np.argsort(coefs)
+
+    fake_label = label_mapping.get(0, "0")
+    real_label = label_mapping.get(1, "1")
+
+    print(f"\n  Top {TOP_N} features pushing toward '{fake_label}' "
+          f"(most negative coefficients):")
+    for idx in order[:TOP_N]:
+        print(f"    {feature_names[idx]:<30} {coefs[idx]:+.4f}")
+
+    print(f"\n  Top {TOP_N} features pushing toward '{real_label}' "
+          f"(most positive coefficients):")
+    for idx in order[-TOP_N:][::-1]:
+        print(f"    {feature_names[idx]:<30} {coefs[idx]:+.4f}")
+
+
+def print_top_features_nb(name, model, feature_names, label_mapping):
+    if not hasattr(model, "feature_log_prob_"):
+        print(f"  [{name}] has no feature_log_prob_, skipping.")
+        return
+
+    # feature_log_prob_ shape: (n_classes, n_features), classes_ gives order
+    classes = list(model.classes_)
+    if len(classes) != 2:
+        print(f"  [{name}] unexpected class count {classes}, skipping.")
+        return
+
+    idx0 = classes.index(0)
+    idx1 = classes.index(1)
+    log_ratio = model.feature_log_prob_[idx1] - model.feature_log_prob_[idx0]
+    order = np.argsort(log_ratio)
+
+    fake_label = label_mapping.get(0, "0")
+    real_label = label_mapping.get(1, "1")
+
+    print(f"\n  Top {TOP_N} features most associated with '{fake_label}' "
+          f"(lowest log P(1)/P(0)):")
+    for idx in order[:TOP_N]:
+        print(f"    {feature_names[idx]:<30} {log_ratio[idx]:+.4f}")
+
+    print(f"\n  Top {TOP_N} features most associated with '{real_label}' "
+          f"(highest log P(1)/P(0)):")
+    for idx in order[-TOP_N:][::-1]:
+        print(f"    {feature_names[idx]:<30} {log_ratio[idx]:+.4f}")
+
+
+def run_test_sentences(bundle, label_mapping):
+    vectorizer = bundle["vectorizer"]
+    models = bundle["models"]
+
+    print("\n" + "=" * 70)
+    print("TEST: neutral / clean-prose synthetic-style sentences")
+    print("=" * 70)
+
+    for sentence in TEST_SENTENCES:
+        vec = vectorizer.transform([normalize_text(sentence)])
+        print(f"\n> {sentence}")
+        for name, model in models.items():
+            pred = int(model.predict(vec)[0])
+            label = label_mapping.get(pred, str(pred))
+            conf = None
+            if hasattr(model, "predict_proba"):
+                conf = float(np.max(model.predict_proba(vec)[0]))
+            conf_str = f"{conf * 100:.1f}%" if conf is not None else "n/a"
+            print(f"    {name:<22} -> {label:<5} (confidence: {conf_str})")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bundle", default=str(BUNDLE_PATH))
+    args = parser.parse_args()
+
+    bundle_path = Path(args.bundle)
+    if not bundle_path.exists():
+        raise SystemExit(
+            f"Bundle not found at {bundle_path}. "
+            f"Run train_classical.py first."
+        )
+
+    bundle = joblib.load(bundle_path)
+    vectorizer = bundle["vectorizer"]
+    models = bundle["models"]
+    label_mapping = bundle.get("label_mapping", {0: "FAKE", 1: "REAL"})
+    # joblib may round-trip int keys as-is; normalize just in case
+    label_mapping = {int(k): v for k, v in label_mapping.items()}
+
+    feature_names = vectorizer.get_feature_names_out()
+
+    print("=" * 70)
+    print("BUNDLE DIAGNOSTIC")
+    print("=" * 70)
+    print(f"Bundle path: {bundle_path}")
+    print(f"Vocabulary size: {len(feature_names)}")
+    print(f"Label mapping stored in bundle: {label_mapping}")
+    print(f"Models in bundle: {list(models.keys())}")
+
+    for name, model in models.items():
+        print("\n" + "-" * 70)
+        print(f"MODEL: {name} ({type(model).__name__})")
+        print("-" * 70)
+        if hasattr(model, "coef_"):
+            print_top_features_linear(name, model, feature_names, label_mapping)
+        elif hasattr(model, "feature_log_prob_"):
+            print_top_features_nb(name, model, feature_names, label_mapping)
+        else:
+            print("  No inspectable linear/NB feature weights found.")
+
+    run_test_sentences(bundle, label_mapping)
+
+    print("\n" + "=" * 70)
+    print("Done. Read the top-REAL feature lists above: if they're dominated")
+    print("by generic/neutral words (the, said, according, officials, etc.)")
+    print("rather than content-specific fake-news markers, that's consistent")
+    print("with the model learning register/style rather than truthfulness.")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="backend/requirements-newsguard.txt">
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
+pandas>=2.1
+numpy>=1.26
+scikit-learn>=1.4
+joblib>=1.3
+pydantic>=2.7
+pytest>=8.0
+httpx>=0.27
+</file>
+
+<file path="backend/train_classical.py">
+import argparse
+import json
+from pathlib import Path
+import joblib
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression, PassiveAggressiveClassifier
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, confusion_matrix
+from app.text import normalize_text
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LABEL_NAMES = {0: "FAKE", 1: "REAL"}
+
+def load_dataset(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    columns = {str(col).strip().lower(): col for col in df.columns}
+    if "label" not in columns:
+        raise ValueError(f"Expected a 'label' column. Found: {list(df.columns)}")
+    text_columns = [columns[c] for c in ("title", "text") if c in columns]
+    if not text_columns:
+        raise ValueError("Expected at least one column named 'title' or 'text'.")
+    text = df[text_columns].fillna("").astype(str).agg(" ".join, axis=1).map(normalize_text)
+    labels = pd.to_numeric(df[columns["label"]], errors="coerce")
+    labels = labels.map({0: 1, 1: 0})   # this CSV's raw convention is 0=real,1=fake — flip to match our 0=FAKE,1=REAL convention
+    valid = labels.isin([0, 1]) & text.str.len().ge(10)
+    clean = pd.DataFrame({"text": text[valid], "label": labels[valid].astype(int)})
+    if set(clean["label"].unique()) != {0, 1}:
+        raise ValueError("Expected both binary labels 0 and 1. Inspect the source dataset and label mapping.")
+    print("ASSUMED label mapping: 0=FAKE, 1=REAL. Verify this against your dataset source.")
+    print("Class counts:", {LABEL_NAMES[k]: int(v) for k, v in clean.label.value_counts().items()})
+    conflicts = clean.groupby("text")["label"].nunique()
+    conflicting_texts = set(conflicts[conflicts > 1].index)
+    clean = clean[~clean.text.isin(conflicting_texts)].drop_duplicates("text")
+    print("Rows after duplicate/conflict removal:", len(clean))
+    return clean
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", default=str(PROJECT_ROOT / "data" / "raw" / "WELFake_Dataset.csv"))
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--test-size", type=float, default=0.2)
+    args = parser.parse_args()
+    data_path = Path(args.data)
+    if not data_path.is_absolute():
+        data_path = PROJECT_ROOT / data_path
+    df = load_dataset(data_path)
+    x_train, x_test, y_train, y_test = train_test_split(
+        df.text, df.label, test_size=args.test_size, random_state=args.seed, stratify=df.label
+    )
+    vectorizer = TfidfVectorizer(max_features=100000, ngram_range=(1, 2),
+                                 min_df=3, max_df=0.98, sublinear_tf=True)
+    x_train_vec = vectorizer.fit_transform(x_train)
+    x_test_vec = vectorizer.transform(x_test)
+    models = {
+        "logistic_regression": LogisticRegression(max_iter=1500, class_weight="balanced"),
+        "passive_aggressive": PassiveAggressiveClassifier(max_iter=1000, random_state=args.seed,
+                                                          class_weight="balanced", early_stopping=True),
+        "naive_bayes": MultinomialNB(alpha=0.1),
+    }
+    (PROJECT_ROOT / "models").mkdir(exist_ok=True)
+    (PROJECT_ROOT / "outputs").mkdir(exist_ok=True)
+    reports = {}
+    for name, model in models.items():
+        model.fit(x_train_vec, y_train)
+        pred = model.predict(x_test_vec)
+        precision, recall, f1, _ = precision_recall_fscore_support(y_test, pred, average="macro", zero_division=0)
+        reports[name] = {
+            "accuracy": float(accuracy_score(y_test, pred)),
+            "macro_precision": float(precision), "macro_recall": float(recall), "macro_f1": float(f1),
+            "classification_report": classification_report(y_test, pred, labels=[0, 1],
+                target_names=["FAKE", "REAL"], output_dict=True, zero_division=0),
+            "confusion_matrix_fake_real": confusion_matrix(y_test, pred, labels=[0, 1]).tolist()
+        }
+        print(f"{name}: accuracy={reports[name]['accuracy']:.4f}, macro_f1={reports[name]['macro_f1']:.4f}")
+    joblib.dump({"vectorizer": vectorizer, "models": models, "label_mapping": LABEL_NAMES},
+                PROJECT_ROOT / "models" / "classical_bundle.joblib")
+    output = {
+        "dataset": data_path.name, "rows_after_deduplication": len(df),
+        "train_rows": len(x_train), "test_rows": len(x_test), "seed": args.seed,
+        "label_mapping": LABEL_NAMES, "models": reports
+    }
+    (PROJECT_ROOT / "outputs" / "classical_metrics.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
+    print("Saved models/classical_bundle.joblib and outputs/classical_metrics.json")
+
+if __name__ == "__main__":
+    main()
+</file>
+
+<file path="frontend/src/App.jsx">
+import { useEffect, useState } from 'react'
+
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+
+const MODELS = [
+  ['logistic_regression', 'Logistic Regression'],
+  ['passive_aggressive', 'Passive-Aggressive'],
+  ['naive_bayes', 'Multinomial Naive Bayes'],
+  ['all', 'Compare all three'],
+]
+
+const MODEL_NAMES = {
+  logistic_regression: 'Logistic Regression',
+  passive_aggressive: 'Passive-Aggressive',
+  naive_bayes: 'Multinomial Naive Bayes',
+}
+
+const percent = value => `${(value * 100).toFixed(1)}%`
+
+const verdictTone = {
+  FAKE: { text: 'text-flagged', border: 'border-flagged', bg: 'bg-flagged/10' },
+  REAL: { text: 'text-verified', border: 'border-verified', bg: 'bg-verified/10' },
+  UNCERTAIN: { text: 'text-pending', border: 'border-pending', bg: 'bg-pending/10' },
+}
+
+function Stat({ value, label }) {
+  return (
+    <div>
+      <p className="font-serif text-3xl text-paper">{value}</p>
+      <p className="mt-1 text-xs text-muted">{label}</p>
+    </div>
+  )
+}
+
+function EvaluationDashboard({ metrics, error, loading }) {
+  if (loading) {
+    return <p className="mt-10 text-sm text-muted">Loading saved evaluation metrics…</p>
+  }
+
+  if (error) {
+    return (
+      <div role="alert" className="mt-10 border-l-2 border-flagged py-3 pl-4 text-sm text-flagged">
+        <p>{error}</p>
+        <p className="mt-1 text-muted">
+          Confirm the backend is running and outputs/classical_metrics.json exists.
+        </p>
+      </div>
+    )
+  }
+
+  if (!metrics) return null
+
+  const modelEntries = Object.entries(metrics.models || {})
+
+  return (
+    <section className="mt-16 border-t border-rule pt-10">
+      <h2 className="font-serif text-2xl text-paper">How the classifiers were evaluated</h2>
+      <p className="mt-2 max-w-[62ch] text-sm leading-6 text-muted">
+        Figures below come from the saved test-set run, not from anything you just typed above.
+        They describe performance on held-out data — not whether any single article is true.
+      </p>
+
+      <div className="mt-8 flex flex-wrap gap-x-10 gap-y-6 border-y border-rule py-6">
+        <Stat value={Number(metrics.train_rows).toLocaleString()} label="training records" />
+        <Stat value={Number(metrics.test_rows).toLocaleString()} label="held-out test records" />
+        <Stat value={Number(metrics.rows_after_deduplication).toLocaleString()} label="records after dedup" />
+        <Stat value={metrics.seed} label="random seed" />
+      </div>
+
+      <div className="mt-10">
+        <h3 className="font-serif text-lg text-paper">Classifier comparison</h3>
+        <div className="mt-4 divide-y divide-rule">
+          {modelEntries.map(([id, result]) => (
+            <div key={id} className="grid grid-cols-[1fr_auto] items-center gap-x-6 gap-y-2 py-4 sm:grid-cols-[180px_1fr_auto]">
+              <span className="text-sm text-paper">{MODEL_NAMES[id] || id}</span>
+
+              <div
+                className="hidden h-1.5 overflow-hidden rounded-full bg-rule sm:block"
+                role="img"
+                aria-label={`${MODEL_NAMES[id] || id} accuracy ${percent(result.accuracy)}`}
+              >
+                <div
+                  className="h-full bg-verified"
+                  style={{ width: `${Math.max(0, Math.min(100, result.accuracy * 100))}%` }}
+                />
+              </div>
+
+              <span className="justify-self-end font-serif text-lg text-paper">
+                {percent(result.accuracy)}
+              </span>
+
+              <div className="col-span-2 flex gap-5 text-xs text-muted sm:col-span-3">
+                <span>Precision {percent(result.macro_precision)}</span>
+                <span>Recall {percent(result.macro_recall)}</span>
+                <span>Macro F1 {percent(result.macro_f1)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-12">
+        <h3 className="font-serif text-lg text-paper">Confusion matrices</h3>
+        <p className="mt-2 text-sm text-muted">
+          Rows are actual labels, columns are predicted labels — in FAKE, then REAL order.
+        </p>
+
+        <div className="mt-5 grid gap-8 lg:grid-cols-3">
+          {modelEntries.map(([id, result]) => {
+            const matrix = result.confusion_matrix_fake_real
+            return (
+              <div key={id}>
+                <h4 className="mb-3 text-sm text-paper">{MODEL_NAMES[id] || id}</h4>
+                {Array.isArray(matrix) && matrix.length === 2 ? (
+                  <table className="w-full border-collapse text-sm">
+                    <thead>
+                      <tr className="text-muted">
+                        <th className="pb-2 text-left font-normal">Actual \ Pred.</th>
+                        <th className="pb-2 font-normal">FAKE</th>
+                        <th className="pb-2 font-normal">REAL</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {matrix.map((row, index) => (
+                        <tr key={index} className="border-t border-rule">
+                          <th className="py-2 text-left font-normal text-muted">
+                            {index === 0 ? 'FAKE' : 'REAL'}
+                          </th>
+                          {row.map((count, column) => (
+                            <td key={column} className="py-2 text-center font-serif text-paper">
+                              {Number(count).toLocaleString()}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p className="text-sm text-muted">Unavailable.</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="mt-10 max-w-[62ch] text-sm leading-6 text-muted">
+        <p><span className="text-paper">Dataset:</span> {metrics.dataset}</p>
+        <p className="mt-1"><span className="text-paper">Label mapping:</span> 0 = FAKE, 1 = REAL</p>
+        <p className="mt-3">
+          These results are specific to this dataset, preprocessing, split, and training run.
+          They're not a guarantee of performance on news from other sources.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+export default function App() {
+  const [text, setText] = useState('')
+  const [model, setModel] = useState('all')
+  const [result, setResult] = useState(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [health, setHealth] = useState('checking')
+
+  const [metrics, setMetrics] = useState(null)
+  const [metricsError, setMetricsError] = useState('')
+  const [metricsLoading, setMetricsLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadDashboard() {
+      try {
+        const response = await fetch(`${API}/metrics`)
+        if (!response.ok) throw new Error(`Metrics request failed (${response.status})`)
+        const data = await response.json()
+        if (!cancelled) setMetrics(data)
+      } catch (err) {
+        if (!cancelled) setMetricsError(err.message)
+      } finally {
+        if (!cancelled) setMetricsLoading(false)
+      }
+    }
+
+    async function checkHealth() {
+      try {
+        const response = await fetch(`${API}/health`)
+        const data = await response.json()
+        if (!cancelled) setHealth(data.models_trained ? 'ready' : 'not-trained')
+      } catch {
+        if (!cancelled) setHealth('offline')
+      }
+    }
+
+    loadDashboard()
+    checkHealth()
+    return () => { cancelled = true }
+  }, [])
+
+  async function analyze() {
+    setError('')
+    setResult(null)
+
+    if (text.trim().length < 10) {
+      setError('Enter at least 10 characters.')
+      return
+    }
+
+    setLoading(true)
+    try {
+      const response = await fetch(`${API}/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, model }),
+      })
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.detail || 'Request failed')
+      setResult(data)
+    } catch (err) {
+      setError(`${err.message}. Check that the backend is running and trained.`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const tone = result ? (verdictTone[result.overall] || verdictTone.UNCERTAIN) : null
+
+  return (
+    <div className="min-h-screen bg-ink font-sans text-paper">
+      <header className="flex items-center justify-between px-6 py-6 sm:px-10">
+        <div className="flex items-baseline gap-3">
+          <span className="font-serif text-xl">NEWSCHECK</span>
+          <span className="text-xs text-muted">text-pattern classifier, not a fact-checker</span>
+        </div>
+        <span className="flex items-center gap-2 text-xs text-muted">
+          <span className={`h-1.5 w-1.5 rounded-full ${
+            health === 'ready' ? 'bg-verified' : health === 'checking' ? 'bg-pending' : 'bg-flagged'
+          }`} />
+          {health}
+        </span>
+      </header>
+
+      <main className="px-6 pb-20 sm:px-10">
+        <div className="mx-auto max-w-3xl">
+          <h1 className="mt-6 max-w-[20ch] font-serif text-4xl leading-tight sm:text-5xl">
+            What does the language of this article actually look like?
+          </h1>
+          <p className="mt-4 max-w-[58ch] text-sm leading-6 text-muted">
+            Paste an article below. Three classifiers, each trained on the same labeled dataset,
+            will separately judge the text and report how confident each one is.
+          </p>
+
+          <section className="mt-10">
+            <label htmlFor="news" className="text-sm text-muted">Article text</label>
+            <textarea
+              id="news"
+              value={text}
+              onChange={event => setText(event.target.value)}
+              maxLength={20000}
+              className="mt-2 min-h-56 w-full rounded-sm border border-rule bg-paper p-4 text-ink outline-none placeholder:text-ink/40 focus:border-verified"
+              placeholder="Paste a headline or article…"
+            />
+            <div className="mt-2 flex items-center justify-between text-xs text-muted">
+              <span>{text.length.toLocaleString()} / 20,000</span>
+            </div>
+
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <select
+                id="model"
+                value={model}
+                onChange={event => setModel(event.target.value)}
+                className="rounded-sm border border-rule bg-ink p-3 text-sm sm:flex-1"
+              >
+                {MODELS.map(([id, name]) => (
+                  <option key={id} value={id}>{name}</option>
+                ))}
+              </select>
+              <button
+                onClick={analyze}
+                disabled={loading}
+                className="rounded-sm bg-verified px-6 py-3 text-sm font-medium text-ink disabled:opacity-50"
+              >
+                {loading ? 'Reading…' : 'Analyze'}
+              </button>
+            </div>
+            {error && <p role="alert" className="mt-3 text-sm text-flagged">{error}</p>}
+          </section>
+
+          <section className="mt-14">
+            {!result ? (
+              <p className="text-sm text-muted">Your result will appear here — nothing analyzed yet.</p>
+            ) : (
+              <div className="flex flex-col gap-8 sm:flex-row sm:items-start">
+                <div
+                  className={`inline-block shrink-0 -rotate-2 border-4 border-double px-6 py-3 ${tone.border} ${tone.bg}`}
+                >
+                  <span className={`font-serif text-3xl tracking-wide ${tone.text}`}>
+                    {result.overall}
+                  </span>
+                </div>
+
+                <div className="flex-1">
+                  <p className="text-xs text-muted">{result.model_count} model result(s)</p>
+                  <div className="mt-3 divide-y divide-rule">
+                    {result.results.map(item => (
+                      <div key={item.model} className="flex items-center justify-between gap-4 py-2.5 text-sm">
+                        <span>{MODEL_NAMES[item.model] || item.model}</span>
+                        <span className="flex items-center gap-3 text-muted">
+                          <span className={verdictTone[item.label]?.text || 'text-paper'}>
+                            {item.label}
+                          </span>
+                          <span>
+                            {item.confidence == null ? 'no estimate' : `${(item.confidence * 100).toFixed(1)}%`}
+                          </span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-4 max-w-[52ch] text-xs leading-5 text-muted">{result.warning}</p>
+                </div>
+              </div>
+            )}
+          </section>
+
+          <EvaluationDashboard metrics={metrics} error={metricsError} loading={metricsLoading} />
+
+          <footer className="mt-16 border-t border-rule pt-6 text-xs text-muted">
+            Evaluation results are loaded from the saved training run. Predictions are text
+            classifications, not independent fact-checks.
+          </footer>
+        </div>
+      </main>
+    </div>
+  )
+}
+</file>
+
+<file path="frontend/src/index.css">
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Sans:wght@400;500&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button, textarea, select {
+  font: inherit;
+}
+</file>
+
+<file path="frontend/src/main.jsx">
+import React from 'react';import{createRoot}from'react-dom/client';import App from './App.jsx';import './index.css';createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>);
+</file>
+
+<file path="frontend/index.html">
+<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>NEWSCHECK — NLP News Analysis</title></head><body><div id="root"></div><script type="module" src="/src/main.jsx"></script></body></html>
+</file>
+
+<file path="frontend/package.json">
+{"name":"NEWSCHECK-frontend","private":true,"version":"1.0.0","type":"module","scripts":{"dev":"vite","build":"vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","lucide-react":"latest","react":"latest","react-dom":"latest","vite":"latest"},"devDependencies":{"autoprefixer":"^10.4.20","postcss":"^8.4.49","tailwindcss":"^3.4.17"}}
+</file>
+
+<file path="frontend/postcss.config.js">
+export default {plugins:{tailwindcss:{},autoprefixer:{}}}
+</file>
+
+<file path="frontend/tailwind.config.js">
+export default {
+  content: ['./index.html', './src/**/*.{js,jsx}'],
+  theme: {
+    extend: {
+      colors: {
+        ink: '#121923',
+        paper: '#E4E8EE',
+        rule: '#2E3A48',
+        flagged: '#C4524A',
+        verified: '#3F8F82',
+        pending: '#A98B55',
+        muted: '#8A96A3',
+      },
+      fontFamily: {
+        serif: ['"Source Serif 4"', 'Georgia', 'serif'],
+        sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+      },
+    },
+  },
+  plugins: [],
+}
+</file>
+
+<file path="frontend/vite.config.js">
+import {defineConfig} from 'vite'; import react from '@vitejs/plugin-react'; export default defineConfig({plugins:[react()]})
+</file>
+
+<file path="outputs/classical_metrics.json">
+{
+  "dataset": "WELFake_Dataset.csv",
+  "rows_after_deduplication": 63658,
+  "train_rows": 50926,
+  "test_rows": 12732,
+  "seed": 42,
+  "label_mapping": {
+    "0": "FAKE",
+    "1": "REAL"
+  },
+  "models": {
+    "logistic_regression": {
+      "accuracy": 0.9630065975494816,
+      "macro_precision": 0.9621029254785349,
+      "macro_recall": 0.9635606453805221,
+      "macro_f1": 0.9627459344046698,
+      "classification_report": {
+        "FAKE": {
+          "precision": 0.9499406075004242,
+          "recall": 0.9695185313474195,
+          "f1-score": 0.9596297248650039,
+          "support": 5774.0
+        },
+        "REAL": {
+          "precision": 0.9742652434566457,
+          "recall": 0.9576027594136246,
+          "f1-score": 0.9658621439443357,
+          "support": 6958.0
+        },
+        "accuracy": 0.9630065975494816,
+        "macro avg": {
+          "precision": 0.9621029254785349,
+          "recall": 0.9635606453805221,
+          "f1-score": 0.9627459344046698,
+          "support": 12732.0
+        },
+        "weighted avg": {
+          "precision": 0.9632339484510517,
+          "recall": 0.9630065975494816,
+          "f1-score": 0.9630357232905451,
+          "support": 12732.0
+        }
+      },
+      "confusion_matrix_fake_real": [
+        [
+          5598,
+          176
+        ],
+        [
+          295,
+          6663
+        ]
+      ]
+    },
+    "passive_aggressive": {
+      "accuracy": 0.9751021049324536,
+      "macro_precision": 0.9748782969222813,
+      "macro_recall": 0.9748922800995194,
+      "macro_f1": 0.974885282341637,
+      "classification_report": {
+        "FAKE": {
+          "precision": 0.9724675324675325,
+          "recall": 0.972635954277797,
+          "f1-score": 0.972551736081046,
+          "support": 5774.0
+        },
+        "REAL": {
+          "precision": 0.9772890613770303,
+          "recall": 0.9771486059212418,
+          "f1-score": 0.9772188286022279,
+          "support": 6958.0
+        },
+        "accuracy": 0.9751021049324536,
+        "macro avg": {
+          "precision": 0.9748782969222813,
+          "recall": 0.9748922800995194,
+          "f1-score": 0.974885282341637,
+          "support": 12732.0
+        },
+        "weighted avg": {
+          "precision": 0.9751024836262103,
+          "recall": 0.9751021049324536,
+          "f1-score": 0.9751022882144409,
+          "support": 12732.0
+        }
+      },
+      "confusion_matrix_fake_real": [
+        [
+          5616,
+          158
+        ],
+        [
+          159,
+          6799
+        ]
+      ]
+    },
+    "naive_bayes": {
+      "accuracy": 0.8895695884385799,
+      "macro_precision": 0.8881920142922645,
+      "macro_recall": 0.89044818667062,
+      "macro_f1": 0.888972095695364,
+      "classification_report": {
+        "FAKE": {
+          "precision": 0.8625498007968128,
+          "recall": 0.8998960859023207,
+          "f1-score": 0.8808272588574335,
+          "support": 5774.0
+        },
+        "REAL": {
+          "precision": 0.9138342277877162,
+          "recall": 0.8810002874389192,
+          "f1-score": 0.8971169325332943,
+          "support": 6958.0
+        },
+        "accuracy": 0.8895695884385799,
+        "macro avg": {
+          "precision": 0.8881920142922645,
+          "recall": 0.89044818667062,
+          "f1-score": 0.888972095695364,
+          "support": 12732.0
+        },
+        "weighted avg": {
+          "precision": 0.8905765870835475,
+          "recall": 0.8895695884385799,
+          "f1-score": 0.8897295169030384,
+          "support": 12732.0
+        }
+      },
+      "confusion_matrix_fake_real": [
+        [
+          5196,
+          578
+        ],
+        [
+          828,
+          6130
+        ]
+      ]
+    }
+  }
+}
+</file>
+
+</files>
